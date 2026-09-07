@@ -200,3 +200,112 @@ class ChoreWorkflowTests(TestCase):
 		chore = Chore.objects.create(household=self.other_household, creator=other_membership, name="Secret")
 		self.assertEqual(self.client.get(reverse("edit_chore", args=[chore.id])).status_code, 404)
 		self.assertEqual(self.client.post(reverse("delete_chore", args=[chore.id])).status_code, 404)
+
+
+class ClaimAndCompletionTests(TestCase):
+	def setUp(self):
+		self.household = Household.objects.create(name="Home")
+		self.other_household = Household.objects.create(name="Other")
+		self.user = User.objects.create_user(username="alex", password="password-123")
+		self.other_user = User.objects.create_user(username="sam", password="password-123")
+		self.membership = Membership.objects.create(household=self.household, user=self.user)
+		self.other_membership = Membership.objects.create(household=self.household, user=self.other_user)
+		self.outsider_membership = Membership.objects.create(household=self.other_household, user=User.objects.create_user(username="outsider"))
+
+	def make_chore(self, name="Dishes", **kwargs):
+		return Chore.objects.create(household=self.household, creator=self.membership, name=name, **kwargs)
+
+	def test_claim_assigns_chore_to_requesting_member(self):
+		chore = self.make_chore()
+		self.client.force_login(self.user)
+		response = self.client.post(reverse("claim_chore", args=[chore.id]))
+		self.assertRedirects(response, reverse("active_chores"))
+		chore.refresh_from_db()
+		self.assertEqual(chore.assignee, self.membership)
+		response = self.client.get(reverse("active_chores"))
+		self.assertContains(response, "alex")
+
+	def test_claim_action_only_shown_for_unassigned_active_chore(self):
+		chore = self.make_chore(assignee=self.other_membership)
+		self.client.force_login(self.user)
+		response = self.client.get(reverse("active_chores"))
+		self.assertNotContains(response, "Claim")
+		unassigned = self.make_chore(name="Bins")
+		response = self.client.get(reverse("active_chores"))
+		self.assertContains(response, "Claim")
+
+	def test_second_claim_does_not_overwrite_existing_assignee(self):
+		chore = self.make_chore()
+		self.client.force_login(self.user)
+		self.client.post(reverse("claim_chore", args=[chore.id]))
+		self.client.force_login(self.other_user)
+		self.client.post(reverse("claim_chore", args=[chore.id]))
+		chore.refresh_from_db()
+		self.assertEqual(chore.assignee, self.membership)
+
+	def test_complete_records_member_and_time(self):
+		chore = self.make_chore()
+		self.client.force_login(self.user)
+		before = timezone.now()
+		response = self.client.post(reverse("complete_chore", args=[chore.id]))
+		self.assertRedirects(response, reverse("active_chores"))
+		chore.refresh_from_db()
+		self.assertEqual(chore.status, Chore.Status.COMPLETED)
+		self.assertEqual(chore.completed_by, self.membership)
+		self.assertLessEqual(chore.completed_at, timezone.now())
+		self.assertGreaterEqual(chore.completed_at, before)
+
+	def test_completed_one_off_leaves_active_list_and_shows_in_history(self):
+		chore = self.make_chore()
+		self.client.force_login(self.user)
+		self.client.post(reverse("complete_chore", args=[chore.id]))
+		response = self.client.get(reverse("active_chores"))
+		self.assertNotContains(response, "Dishes")
+		response = self.client.get(reverse("completed_chores"))
+		self.assertContains(response, "Dishes")
+		self.assertContains(response, "alex")
+		self.assertContains(response, "Completed by")
+
+	def test_repeated_complete_does_not_change_completion_record(self):
+		chore = self.make_chore()
+		self.client.force_login(self.user)
+		self.client.post(reverse("complete_chore", args=[chore.id]))
+		chore.refresh_from_db()
+		original_time = chore.completed_at
+		self.client.force_login(self.other_user)
+		self.client.post(reverse("complete_chore", args=[chore.id]))
+		chore.refresh_from_db()
+		self.assertEqual(chore.completed_by, self.membership)
+		self.assertEqual(chore.completed_at, original_time)
+
+	def test_completed_chore_cannot_be_claimed(self):
+		chore = self.make_chore()
+		self.client.force_login(self.user)
+		self.client.post(reverse("complete_chore", args=[chore.id]))
+		self.client.force_login(self.other_user)
+		self.client.post(reverse("claim_chore", args=[chore.id]))
+		chore.refresh_from_db()
+		self.assertIsNone(chore.assignee)
+
+	def test_anonymous_user_cannot_claim_or_complete(self):
+		chore = self.make_chore()
+		response = self.client.post(reverse("claim_chore", args=[chore.id]))
+		self.assertEqual(response.status_code, 302)
+		self.assertIn("signin", response["Location"])
+		response = self.client.post(reverse("complete_chore", args=[chore.id]))
+		self.assertEqual(response.status_code, 302)
+		self.assertIn("signin", response["Location"])
+		chore.refresh_from_db()
+		self.assertIsNone(chore.assignee)
+		self.assertEqual(chore.status, Chore.Status.ACTIVE)
+
+	def test_member_of_other_household_cannot_claim_or_complete(self):
+		chore = self.make_chore()
+		self.client.force_login(User.objects.get(username="outsider"))
+		response = self.client.post(reverse("claim_chore", args=[chore.id]))
+		self.assertEqual(response.status_code, 404)
+		response = self.client.post(reverse("complete_chore", args=[chore.id]))
+		self.assertEqual(response.status_code, 404)
+		chore.refresh_from_db()
+		self.assertIsNone(chore.assignee)
+		self.assertEqual(chore.status, Chore.Status.ACTIVE)

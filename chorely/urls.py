@@ -33,4 +33,7 @@ urlpatterns = [
     path('chores/create/', views.create_chore, name='create_chore'),
     path('chores/<int:chore_id>/edit/', views.edit_chore, name='edit_chore'),
     path('chores/<int:chore_id>/delete/', views.delete_chore, name='delete_chore'),
+    path('chores/<int:chore_id>/claim/', views.claim_chore, name='claim_chore'),
+    path('chores/<int:chore_id>/complete/', views.complete_chore, name='complete_chore'),
+    path('chores/completed/', views.completed_chores, name='completed_chores'),
 ]

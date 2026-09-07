@@ -149,3 +149,53 @@ def delete_chore(request, chore_id):
 	membership = get_object_or_404(Membership, user=request.user)
 	get_object_or_404(Chore, id=chore_id, household=membership.household).delete()
 	return redirect("active_chores")
+
+
+@login_required
+@require_POST
+def claim_chore(request, chore_id):
+	membership = get_object_or_404(Membership, user=request.user)
+	with transaction.atomic():
+		chore = get_object_or_404(Chore.objects.select_for_update(), id=chore_id, household=membership.household)
+		if chore.status != Chore.Status.ACTIVE:
+			return redirect("active_chores")
+		Chore.objects.filter(id=chore.id, assignee__isnull=True).update(assignee=membership)
+	return redirect("active_chores")
+
+
+@login_required
+@require_POST
+def complete_chore(request, chore_id):
+	membership = get_object_or_404(Membership, user=request.user)
+	with transaction.atomic():
+		chore = get_object_or_404(Chore.objects.select_for_update(), id=chore_id, household=membership.household)
+		updated = Chore.objects.filter(
+			id=chore.id,
+			status=Chore.Status.ACTIVE,
+		).update(
+			status=Chore.Status.COMPLETED,
+			completed_by=membership,
+			completed_at=timezone.now(),
+		)
+		if not updated:
+			return redirect("active_chores")
+	return redirect("active_chores")
+
+
+@login_required
+def completed_chores(request):
+	membership = getattr(request.user, "membership", None)
+	if membership is None:
+		return redirect("onboarding")
+	chores = (
+		Chore.objects.filter(
+			household=membership.household,
+			status=Chore.Status.COMPLETED,
+		)
+		.select_related("assignee__user", "completed_by__user")
+		.order_by("-completed_at")
+	)
+	return render(request, "chores/completed_chores.html", {
+		"household": membership.household,
+		"chores": chores,
+	})

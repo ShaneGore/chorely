@@ -85,6 +85,14 @@ class Chore(models.Model):
 		choices=Status,
 		default=Status.ACTIVE,
 	)
+	completed_by = models.ForeignKey(
+		Membership,
+		on_delete=models.PROTECT,
+		related_name="completed_chores",
+		blank=True,
+		null=True,
+	)
+	completed_at = models.DateTimeField(blank=True, null=True)
 
 	class Meta:
 		constraints = [
