@@ -8,8 +8,8 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from .forms import CreateHouseholdForm, JoinHouseholdForm, SignUpForm
-from .models import InviteCode, Membership
+from .forms import ChoreForm, CreateHouseholdForm, JoinHouseholdForm, SignUpForm
+from .models import Chore, InviteCode, Membership
 
 
 def account_redirect(request):
@@ -93,3 +93,59 @@ def join_household(request):
 		except (InviteCode.DoesNotExist, ValueError, IntegrityError):
 			form.add_error("code", "This invite is invalid, expired, or already used.")
 	return render(request, "chores/join_household.html", {"form": form})
+
+
+@login_required
+def active_chores(request):
+	membership = getattr(request.user, "membership", None)
+	if membership is None:
+		return redirect("onboarding")
+	chores = Chore.objects.filter(
+		household=membership.household,
+		status=Chore.Status.ACTIVE,
+	).select_related("assignee__user").order_by("due_date", "name")
+	return render(request, "chores/active_chores.html", {
+		"household": membership.household,
+		"chores": chores,
+	})
+
+
+TEMPLATES = {
+	"rubbish": "Take out rubbish",
+	"dishes": "Wash dishes",
+	"vacuum": "Vacuum",
+	"bathroom": "Clean bathroom",
+}
+
+
+@login_required
+def create_chore(request):
+	membership = get_object_or_404(Membership, user=request.user)
+	initial = {"name": TEMPLATES[request.GET["template"]]} if request.method == "GET" and request.GET.get("template") in TEMPLATES else None
+	form = ChoreForm(membership.household, request.POST or None, initial=initial)
+	if request.method == "POST" and form.is_valid():
+		chore = form.save(commit=False)
+		chore.household = membership.household
+		chore.creator = membership
+		chore.save()
+		return redirect("active_chores")
+	return render(request, "chores/create_chore.html", {"form": form})
+
+
+@login_required
+def edit_chore(request, chore_id):
+	membership = get_object_or_404(Membership, user=request.user)
+	chore = get_object_or_404(Chore, id=chore_id, household=membership.household)
+	form = ChoreForm(membership.household, request.POST or None, instance=chore)
+	if request.method == "POST" and form.is_valid():
+		form.save()
+		return redirect("active_chores")
+	return render(request, "chores/edit_chore.html", {"form": form, "chore": chore})
+
+
+@login_required
+@require_POST
+def delete_chore(request, chore_id):
+	membership = get_object_or_404(Membership, user=request.user)
+	get_object_or_404(Chore, id=chore_id, household=membership.household).delete()
+	return redirect("active_chores")

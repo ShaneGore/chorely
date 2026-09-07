@@ -153,3 +153,50 @@ class OnboardingTests(TestCase):
 		invite.save(update_fields=("expires_at", "used_at"))
 		response = self.client.post(reverse("join_household"), {"code": code})
 		self.assertContains(response, "invalid, expired, or already used")
+
+
+class ChoreWorkflowTests(TestCase):
+	def setUp(self):
+		self.household = Household.objects.create(name="Home")
+		self.other_household = Household.objects.create(name="Other")
+		self.user = User.objects.create_user(username="alex", password="password-123")
+		self.other_user = User.objects.create_user(username="sam", password="password-123")
+		self.membership = Membership.objects.create(household=self.household, user=self.user)
+		self.other_membership = Membership.objects.create(household=self.household, user=self.other_user)
+		self.client.force_login(self.user)
+
+	def test_active_list_is_shared_and_excludes_completed_and_other_household(self):
+		Chore.objects.create(household=self.household, creator=self.membership, name="Dishes")
+		Chore.objects.create(household=self.household, creator=self.membership, name="Done", status=Chore.Status.COMPLETED)
+		other_membership = Membership.objects.create(household=self.other_household, user=User.objects.create_user(username="other"))
+		Chore.objects.create(household=self.other_household, creator=other_membership, name="Secret")
+		response = self.client.get(reverse("active_chores"))
+		self.assertContains(response, "Dishes")
+		self.assertNotContains(response, "Done")
+		self.assertNotContains(response, "Secret")
+		self.assertContains(response, "Unassigned")
+
+	def test_user_without_membership_gets_onboarding(self):
+		user = User.objects.create_user(username="solo", password="password-123")
+		self.client.force_login(user)
+		self.assertRedirects(self.client.get(reverse("active_chores")), reverse("onboarding"))
+
+	def test_create_edit_delete_and_template_prefill(self):
+		response = self.client.get(reverse("create_chore") + "?template=vacuum")
+		self.assertContains(response, "Vacuum")
+		response = self.client.post(reverse("create_chore"), {"name": "  ", "schedule": "one_off"})
+		self.assertContains(response, "cannot be blank")
+		response = self.client.post(reverse("create_chore"), {"name": "Dishes", "description": "Daily", "schedule": "daily", "assignee": self.other_membership.id})
+		self.assertRedirects(response, reverse("active_chores"))
+		chore = Chore.objects.get(name="Dishes")
+		self.assertEqual(chore.assignee, self.other_membership)
+		self.client.post(reverse("edit_chore", args=[chore.id]), {"name": "New dishes", "schedule": "weekly", "assignee": ""})
+		self.assertTrue(Chore.objects.filter(name="New dishes", schedule="weekly").exists())
+		self.client.post(reverse("delete_chore", args=[chore.id]))
+		self.assertFalse(Chore.objects.filter(pk=chore.id).exists())
+
+	def test_chore_object_isolated_from_other_household(self):
+		other_membership = Membership.objects.create(household=self.other_household, user=User.objects.create_user(username="other"))
+		chore = Chore.objects.create(household=self.other_household, creator=other_membership, name="Secret")
+		self.assertEqual(self.client.get(reverse("edit_chore", args=[chore.id])).status_code, 404)
+		self.assertEqual(self.client.post(reverse("delete_chore", args=[chore.id])).status_code, 404)

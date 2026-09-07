@@ -29,4 +29,8 @@ urlpatterns = [
     path('household/create/', views.create_household, name='create_household'),
     path('household/join/', views.join_household, name='join_household'),
     path('household/', views.household_detail, name='household_detail'),
+    path('chores/', views.active_chores, name='active_chores'),
+    path('chores/create/', views.create_chore, name='create_chore'),
+    path('chores/<int:chore_id>/edit/', views.edit_chore, name='edit_chore'),
+    path('chores/<int:chore_id>/delete/', views.delete_chore, name='delete_chore'),
 ]
