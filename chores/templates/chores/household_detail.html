@@ -1,0 +1,1 @@
+{% extends "chores/base.html" %}{% block content %}<h1>{{ household.name }}</h1><ul>{% for membership in household.memberships.all %}<li>{{ membership.user.username }}</li>{% endfor %}</ul><form method="post">{% csrf_token %}<button>Generate invite</button></form>{% if invite %}<p>{{ invite.code }}</p>{% endif %}{% endblock %}

@@ -1,5 +1,11 @@
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
+import secrets
+
+
+def invite_code():
+	return secrets.token_urlsafe(32)
 
 
 class Household(models.Model):
@@ -23,6 +29,19 @@ class Membership(models.Model):
 
 	def __str__(self):
 		return f"{self.user} in {self.household}"
+
+
+class InviteCode(models.Model):
+	household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name="invites")
+	code = models.CharField(max_length=64, unique=True, default=invite_code)
+	created_at = models.DateTimeField(auto_now_add=True)
+	expires_at = models.DateTimeField()
+	used_at = models.DateTimeField(blank=True, null=True)
+	used_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, blank=True, null=True)
+
+	@property
+	def is_valid(self):
+		return self.used_at is None and self.expires_at > timezone.now()
 
 
 class Chore(models.Model):

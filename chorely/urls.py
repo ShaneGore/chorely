@@ -17,6 +17,16 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 
+from chores import views
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('', views.account_redirect, name='account_redirect'),
+    path('accounts/signup/', views.signup, name='signup'),
+    path('accounts/signin/', views.signin, name='signin'),
+    path('accounts/signout/', views.signout, name='signout'),
+    path('onboarding/', views.onboarding, name='onboarding'),
+    path('household/create/', views.create_household, name='create_household'),
+    path('household/join/', views.join_household, name='join_household'),
+    path('household/', views.household_detail, name='household_detail'),
 ]

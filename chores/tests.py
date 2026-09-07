@@ -2,8 +2,11 @@ from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.test import TestCase
+from django.urls import reverse
+from django.utils import timezone
+from datetime import timedelta
 
-from .models import Chore, Household, Membership
+from .models import Chore, Household, InviteCode, Membership
 
 
 class DomainModelTests(TestCase):
@@ -106,3 +109,47 @@ class DomainModelTests(TestCase):
 			assignee_mismatch.full_clean()
 		with self.assertRaises(ValidationError):
 			assignee_mismatch.save()
+
+
+class OnboardingTests(TestCase):
+	def setUp(self):
+		self.user = User.objects.create_user(username="alex", password="correct-password")
+		self.other_user = User.objects.create_user(username="sam", password="correct-password")
+
+	def test_anonymous_users_are_sent_to_signin(self):
+		response = self.client.get(reverse("onboarding"))
+		self.assertRedirects(response, f"{reverse('signin')}?next={reverse('onboarding')}")
+
+	def test_signup_and_signin(self):
+		response = self.client.post(reverse("signup"), {"username": "new", "password1": "strong-password-123", "password2": "strong-password-123"})
+		self.assertRedirects(response, reverse("signin"))
+		response = self.client.post(reverse("signin"), {"username": "new", "password": "strong-password-123"})
+		self.assertRedirects(response, reverse("onboarding"))
+
+	def test_create_household_adds_creator_and_lists_members(self):
+		self.client.force_login(self.user)
+		response = self.client.post(reverse("create_household"), {"name": "Home"})
+		self.assertRedirects(response, reverse("household_detail"))
+		self.assertTrue(Membership.objects.filter(user=self.user, household__name="Home").exists())
+		response = self.client.get(reverse("household_detail"))
+		self.assertContains(response, "alex")
+
+	def test_invite_can_be_used_once_and_expired_invites_fail(self):
+		self.client.force_login(self.user)
+		self.client.post(reverse("create_household"), {"name": "Home"})
+		response = self.client.post(reverse("household_detail"))
+		code = response.context["invite"].code
+		self.client.force_login(self.other_user)
+		response = self.client.post(reverse("join_household"), {"code": code})
+		self.assertRedirects(response, reverse("household_detail"))
+		self.client.logout()
+		third = User.objects.create_user(username="third", password="correct-password")
+		self.client.force_login(third)
+		response = self.client.post(reverse("join_household"), {"code": code})
+		self.assertContains(response, "invalid, expired, or already used")
+		invite = InviteCode.objects.get(code=code)
+		invite.expires_at = timezone.now() - timedelta(days=1)
+		invite.used_at = None
+		invite.save(update_fields=("expires_at", "used_at"))
+		response = self.client.post(reverse("join_household"), {"code": code})
+		self.assertContains(response, "invalid, expired, or already used")

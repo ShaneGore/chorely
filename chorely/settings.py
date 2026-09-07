@@ -51,6 +51,7 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = 'chorely.urls'
+LOGIN_URL = '/accounts/signin/'
 
 TEMPLATES = [
     {

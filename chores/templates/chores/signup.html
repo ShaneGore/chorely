@@ -1,0 +1,1 @@
+{% extends "chores/base.html" %}{% block content %}<h1>Sign up</h1><form method="post">{% csrf_token %}{{ form.as_p }}<button>Create account</button></form><a href="{% url 'signin' %}">Sign in</a>{% endblock %}

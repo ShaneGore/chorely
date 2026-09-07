@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="en">
+<body>
+{% if user.is_authenticated %}<form method="post" action="{% url 'signout' %}">{% csrf_token %}<button>Sign out</button></form>{% endif %}
+{% block content %}{% endblock %}
+</body>
+</html>
