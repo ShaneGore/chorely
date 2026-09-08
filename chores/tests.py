@@ -423,3 +423,90 @@ class RecurrenceTests(TestCase):
 				name="Model level",
 				schedule=Chore.Schedule.WEEKLY,
 			)
+
+
+class HistoryAndFilterTests(TestCase):
+	def setUp(self):
+		self.household = Household.objects.create(name="Home")
+		self.other_household = Household.objects.create(name="Other")
+		self.user = User.objects.create_user(username="alex", password="password-123")
+		self.other_user = User.objects.create_user(username="sam", password="password-123")
+		self.membership = Membership.objects.create(household=self.household, user=self.user)
+		self.other_membership = Membership.objects.create(household=self.household, user=self.other_user)
+		self.client.force_login(self.user)
+
+	def make_chore(self, name="Dishes", **kwargs):
+		return Chore.objects.create(household=self.household, creator=self.membership, name=name, **kwargs)
+
+	def complete(self, chore):
+		self.client.post(reverse("complete_chore", args=[chore.id]))
+
+	def test_history_shows_only_own_household_newest_first(self):
+		first = self.make_chore(name="First")
+		second = self.make_chore(name="Second")
+		self.complete(first)
+		self.complete(second)
+		outsider_membership = Membership.objects.create(household=self.other_household, user=User.objects.create_user(username="outsider"))
+		Chore.objects.create(household=self.other_household, creator=outsider_membership, name="Secret", status=Chore.Status.COMPLETED)
+		response = self.client.get(reverse("completed_chores"))
+		self.assertContains(response, "First")
+		self.assertContains(response, "Second")
+		self.assertNotContains(response, "Secret")
+		second_pos = response.content.decode().index("Second")
+		first_pos = response.content.decode().index("First")
+		self.assertLess(second_pos, first_pos)
+		self.assertContains(response, "alex")
+		self.assertContains(response, "Completed by")
+
+	def test_empty_history_shows_clear_state(self):
+		response = self.client.get(reverse("completed_chores"))
+		self.assertContains(response, "No completed chores yet")
+
+	def test_my_chores_filter_includes_assigned_and_own_unassigned(self):
+		assigned_to_me = self.make_chore(name="Mine assigned", assignee=self.membership)
+		created_unassigned = self.make_chore(name="Mine unassigned")
+		assigned_away = self.make_chore(name="Assigned away", assignee=self.other_membership)
+		response = self.client.get(reverse("active_chores") + "?filter=mine")
+		self.assertContains(response, "Mine assigned")
+		self.assertContains(response, "Mine unassigned")
+		self.assertNotContains(response, "Assigned away")
+		response = self.client.get(reverse("active_chores"))
+		self.assertContains(response, "Mine assigned")
+		self.assertContains(response, "Assigned away")
+
+	def test_dated_chores_order_before_undated(self):
+		late = self.make_chore(name="Late", due_date=date(2026, 9, 20))
+		early = self.make_chore(name="Early", due_date=date(2026, 9, 10))
+		undated = self.make_chore(name="Undated")
+		response = self.client.get(reverse("active_chores"))
+		content = response.content.decode()
+		self.assertLess(content.index("Early"), content.index("Late"))
+		self.assertLess(content.index("Late"), content.index("Undated"))
+
+	def test_filters_and_history_are_household_scoped(self):
+		outsider_membership = Membership.objects.create(household=self.other_household, user=User.objects.create_user(username="outsider"))
+		Chore.objects.create(household=self.other_household, creator=outsider_membership, name="Secret", assignee=outsider_membership)
+		response = self.client.get(reverse("active_chores") + "?filter=mine")
+		self.assertNotContains(response, "Secret")
+		response = self.client.get(reverse("completed_chores"))
+		self.assertNotContains(response, "Secret")
+
+	def test_navigation_links_expose_main_flows(self):
+		response = self.client.get(reverse("active_chores"))
+		self.assertContains(response, "History")
+		self.assertContains(response, "Household")
+		self.assertContains(response, "Create chore")
+		response = self.client.get(reverse("household_detail"))
+		self.assertContains(response, "Active chores")
+
+	def test_signed_out_user_redirected_and_household_less_user_onboarded(self):
+		self.client.logout()
+		response = self.client.get(reverse("completed_chores"))
+		self.assertEqual(response.status_code, 302)
+		self.assertIn("signin", response["Location"])
+		response = self.client.get(reverse("active_chores") + "?filter=mine")
+		self.assertEqual(response.status_code, 302)
+		self.assertIn("signin", response["Location"])
+		solo = User.objects.create_user(username="solo", password="password-123")
+		self.client.force_login(solo)
+		self.assertRedirects(self.client.get(reverse("completed_chores")), reverse("onboarding"))

@@ -3,7 +3,7 @@ from datetime import timedelta
 from django.contrib.auth import login, logout
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import AuthenticationForm
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
@@ -103,7 +103,18 @@ def active_chores(request):
 	chores = Chore.objects.filter(
 		household=membership.household,
 		status=Chore.Status.ACTIVE,
-	).select_related("assignee__user").order_by("due_date", "name")
+	)
+	# "My chores" means chores assigned to the current member plus chores
+	# they created that are still unassigned; assigned-away chores drop out.
+	if request.GET.get("filter") == "mine":
+		chores = chores.filter(
+			models.Q(assignee=membership)
+			| models.Q(assignee__isnull=True, creator=membership)
+		)
+	chores = chores.select_related("assignee__user").order_by(
+		models.F("due_date").asc(nulls_last=True),
+		"name",
+	)
 	return render(request, "chores/active_chores.html", {
 		"household": membership.household,
 		"chores": chores,
@@ -204,7 +215,7 @@ def completed_chores(request):
 			status=Chore.Status.COMPLETED,
 		)
 		.select_related("assignee__user", "completed_by__user")
-		.order_by("-completed_at")
+		.order_by(models.F("completed_at").desc(nulls_last=True))
 	)
 	return render(request, "chores/completed_chores.html", {
 		"household": membership.household,

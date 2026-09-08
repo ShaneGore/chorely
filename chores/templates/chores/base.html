@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en">
 <body>
-{% if user.is_authenticated %}<form method="post" action="{% url 'signout' %}">{% csrf_token %}<button>Sign out</button></form>{% endif %}
+{% if user.is_authenticated %}<nav><a href="{% url 'active_chores' %}">Active chores</a> <a href="{% url 'completed_chores' %}">History</a> <a href="{% url 'household_detail' %}">Household</a></nav><form method="post" action="{% url 'signout' %}">{% csrf_token %}<button>Sign out</button></form>{% endif %}
 {% block content %}{% endblock %}
 </body>
 </html>
