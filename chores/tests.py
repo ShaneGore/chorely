@@ -510,3 +510,110 @@ class HistoryAndFilterTests(TestCase):
 		solo = User.objects.create_user(username="solo", password="password-123")
 		self.client.force_login(solo)
 		self.assertRedirects(self.client.get(reverse("completed_chores")), reverse("onboarding"))
+
+
+class SmokeJourneyTests(TestCase):
+	"""End-to-end journey: two members, claim, recurrence, edit, history."""
+
+	def test_full_mvp_journey_from_fresh_database(self):
+		# Sign up two members.
+		self.client.post(reverse("signup"), {"username": "alex", "password1": "strong-password-123", "password2": "strong-password-123"})
+		self.client.post(reverse("signin"), {"username": "alex", "password": "strong-password-123"})
+		# Alex creates the household.
+		self.client.post(reverse("create_household"), {"name": "Home"})
+		# Alex generates an invite and Sam joins with it.
+		response = self.client.post(reverse("household_detail"))
+		code = response.context["invite"].code
+		self.client.post(reverse("signup"), {"username": "sam", "password1": "strong-password-123", "password2": "strong-password-123"})
+		self.client.post(reverse("signin"), {"username": "sam", "password": "strong-password-123"})
+		self.assertRedirects(self.client.post(reverse("join_household"), {"code": code}), reverse("household_detail"))
+		household = Household.objects.get(name="Home")
+		self.assertEqual(household.memberships.count(), 2)
+		alex = Membership.objects.get(user__username="alex")
+		sam = Membership.objects.get(user__username="sam")
+		# Alex creates a recurring chore assigned to Sam.
+		self.client.force_login(alex.user)
+		self.client.post(reverse("create_chore"), {"name": "Vacuum", "schedule": "weekly", "due_date": "2026-09-08", "assignee": sam.id})
+		recurring = Chore.objects.get(name="Vacuum")
+		self.assertEqual(recurring.assignee, sam)
+		# Sam creates a one-off chore left unassigned.
+		self.client.force_login(sam.user)
+		self.client.post(reverse("create_chore"), {"name": "Bins", "schedule": "one_off"})
+		bins = Chore.objects.get(name="Bins")
+		self.assertIsNone(bins.assignee)
+		# Alex claims the unassigned chore.
+		self.client.force_login(alex.user)
+		self.client.post(reverse("claim_chore", args=[bins.id]))
+		bins.refresh_from_db()
+		self.assertEqual(bins.assignee, alex)
+		# Sam completes the recurring chore; the next occurrence appears.
+		self.client.force_login(sam.user)
+		self.client.post(reverse("complete_chore", args=[recurring.id]))
+		next_occurrence = Chore.objects.get(name="Vacuum", status=Chore.Status.ACTIVE)
+		self.assertEqual(next_occurrence.due_date, date(2026, 9, 15))
+		# Alex completes the one-off chore and edits the next occurrence.
+		self.client.force_login(alex.user)
+		self.client.post(reverse("complete_chore", args=[bins.id]))
+		self.client.post(reverse("edit_chore", args=[next_occurrence.id]), {"name": "Vacuum downstairs", "schedule": "weekly", "due_date": "2026-09-15", "assignee": ""})
+		self.assertTrue(Chore.objects.filter(name="Vacuum downstairs", status=Chore.Status.ACTIVE).exists())
+		# History shows both completions with completer and time.
+		response = self.client.get(reverse("completed_chores"))
+		self.assertContains(response, "Bins")
+		self.assertContains(response, "Vacuum")
+		self.assertContains(response, "Completed by")
+		# Sam deletes the edited chore.
+		self.client.force_login(sam.user)
+		self.client.post(reverse("delete_chore", args=[next_occurrence.id]))
+		self.assertFalse(Chore.objects.filter(name="Vacuum downstairs").exists())
+
+
+class HardeningTests(TestCase):
+	"""Sweep tests for the cross-cutting hardening criteria."""
+
+	def setUp(self):
+		self.household = Household.objects.create(name="Home")
+		self.user = User.objects.create_user(username="alex", password="password-123")
+		self.membership = Membership.objects.create(household=self.household, user=self.user)
+		self.chore = Chore.objects.create(household=self.household, creator=self.membership, name="Dishes")
+		self.client.force_login(self.user)
+
+	def test_state_changing_endpoints_reject_missing_csrf_token(self):
+		from django.test import Client
+
+		enforce_csrf = Client(enforce_csrf_checks=True)
+		enforce_csrf.force_login(self.user)
+		endpoints = [
+			("post", reverse("signout"), {}),
+			("post", reverse("household_detail"), {}),
+			("post", reverse("create_chore"), {"name": "X", "schedule": "one_off"}),
+			("post", reverse("delete_chore", args=[self.chore.id]), {}),
+			("post", reverse("claim_chore", args=[self.chore.id]), {}),
+			("post", reverse("complete_chore", args=[self.chore.id]), {}),
+		]
+		for method, url, data in endpoints:
+			response = getattr(enforce_csrf, method)(url, data)
+			self.assertEqual(response.status_code, 403, f"{url} accepted a request without a CSRF token")
+		self.chore.refresh_from_db()
+		self.assertEqual(self.chore.status, Chore.Status.ACTIVE)
+
+	def test_get_requests_cannot_change_state(self):
+		for url in (reverse("delete_chore", args=[self.chore.id]), reverse("claim_chore", args=[self.chore.id]), reverse("complete_chore", args=[self.chore.id])):
+			response = self.client.get(url)
+			self.assertEqual(response.status_code, 405, f"{url} accepted GET")
+		self.chore.refresh_from_db()
+		self.assertEqual(self.chore.status, Chore.Status.ACTIVE)
+
+	def test_anonymous_users_are_redirected_consistently(self):
+		self.client.logout()
+		protected_gets = ["onboarding", "household_detail", "active_chores", "completed_chores", "create_chore", "edit_chore"]
+		for name in protected_gets:
+			url = reverse(name) if name != "edit_chore" else reverse("edit_chore", args=[self.chore.id])
+			response = self.client.get(url)
+			self.assertEqual(response.status_code, 302, f"{url} did not redirect anonymous users")
+			self.assertIn("signin", response["Location"], f"{url} did not redirect to signin")
+		protected_posts = ["signout", "household_detail", "create_chore", "delete_chore", "claim_chore", "complete_chore"]
+		for name in protected_posts:
+			url = reverse(name) if name not in ("delete_chore", "claim_chore", "complete_chore") else reverse(name, args=[self.chore.id])
+			response = self.client.post(url, {})
+			self.assertEqual(response.status_code, 302, f"{url} did not redirect anonymous users")
+			self.assertIn("signin", response["Location"], f"{url} did not redirect to signin")
