@@ -179,6 +179,17 @@ def complete_chore(request, chore_id):
 		)
 		if not updated:
 			return redirect("active_chores")
+		chore.refresh_from_db()
+		if chore.schedule != Chore.Schedule.ONE_OFF:
+			# The completed row stays as the occurrence's history record; the
+			# next occurrence is a fresh active copy of the recurring chore.
+			next_occurrence = Chore.objects.get(pk=chore.pk)
+			next_occurrence.pk = None
+			next_occurrence.status = Chore.Status.ACTIVE
+			next_occurrence.completed_by = None
+			next_occurrence.completed_at = None
+			next_occurrence.due_date = chore.next_due_date(chore.due_date)
+			next_occurrence.save()
 	return redirect("active_chores")
 
 

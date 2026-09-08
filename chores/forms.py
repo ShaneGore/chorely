@@ -43,6 +43,14 @@ class ChoreForm(forms.ModelForm):
 		self.fields["assignee"].queryset = household.memberships.select_related("user")
 		self.fields["due_date"].required = False
 
+	def clean(self):
+		cleaned_data = super().clean()
+		schedule = cleaned_data.get("schedule")
+		due_date = cleaned_data.get("due_date")
+		if schedule and schedule != Chore.Schedule.ONE_OFF and not due_date:
+			self.add_error("due_date", "A recurring chore needs a due date so the next occurrence can be scheduled.")
+		return cleaned_data
+
 	def clean_name(self):
 		name = self.cleaned_data["name"].strip()
 		if not name:

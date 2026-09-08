@@ -4,7 +4,7 @@ from django.db import IntegrityError, transaction
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
-from datetime import timedelta
+from datetime import date, timedelta
 
 from .models import Chore, Household, InviteCode, Membership
 
@@ -71,6 +71,7 @@ class DomainModelTests(TestCase):
 					name=f"{schedule} {status}",
 					schedule=schedule,
 					status=status,
+					due_date=date(2026, 9, 8) if schedule != Chore.Schedule.ONE_OFF else None,
 				)
 				chore.full_clean()
 
@@ -88,6 +89,15 @@ class DomainModelTests(TestCase):
 				creator=self.membership,
 				name="Invalid status",
 				status="invalid",
+			)
+
+	def test_recurring_chore_requires_a_due_date(self):
+		with self.assertRaises(ValidationError):
+			Chore.objects.create(
+				household=self.household,
+				creator=self.membership,
+				name="No anchor",
+				schedule=Chore.Schedule.DAILY,
 			)
 
 	def test_creator_and_assignee_must_share_household(self):
@@ -186,11 +196,11 @@ class ChoreWorkflowTests(TestCase):
 		self.assertContains(response, "Vacuum")
 		response = self.client.post(reverse("create_chore"), {"name": "  ", "schedule": "one_off"})
 		self.assertContains(response, "cannot be blank")
-		response = self.client.post(reverse("create_chore"), {"name": "Dishes", "description": "Daily", "schedule": "daily", "assignee": self.other_membership.id})
+		response = self.client.post(reverse("create_chore"), {"name": "Dishes", "description": "Daily", "schedule": "daily", "due_date": "2026-09-08", "assignee": self.other_membership.id})
 		self.assertRedirects(response, reverse("active_chores"))
 		chore = Chore.objects.get(name="Dishes")
 		self.assertEqual(chore.assignee, self.other_membership)
-		self.client.post(reverse("edit_chore", args=[chore.id]), {"name": "New dishes", "schedule": "weekly", "assignee": ""})
+		self.client.post(reverse("edit_chore", args=[chore.id]), {"name": "New dishes", "schedule": "weekly", "due_date": "2026-09-08", "assignee": ""})
 		self.assertTrue(Chore.objects.filter(name="New dishes", schedule="weekly").exists())
 		self.client.post(reverse("delete_chore", args=[chore.id]))
 		self.assertFalse(Chore.objects.filter(pk=chore.id).exists())
@@ -309,3 +319,107 @@ class ClaimAndCompletionTests(TestCase):
 		chore.refresh_from_db()
 		self.assertIsNone(chore.assignee)
 		self.assertEqual(chore.status, Chore.Status.ACTIVE)
+
+
+class RecurrenceTests(TestCase):
+	def setUp(self):
+		self.household = Household.objects.create(name="Home")
+		self.user = User.objects.create_user(username="alex", password="password-123")
+		self.membership = Membership.objects.create(household=self.household, user=self.user)
+		self.client.force_login(self.user)
+
+	def make_recurring(self, name, schedule, due, **kwargs):
+		return Chore.objects.create(
+			household=self.household,
+			creator=self.membership,
+			name=name,
+			schedule=schedule,
+			due_date=due,
+			**kwargs,
+		)
+
+	def complete(self, chore):
+		response = self.client.post(reverse("complete_chore", args=[chore.id]))
+		self.assertRedirects(response, reverse("active_chores"))
+
+	def test_daily_occurrence_is_due_next_day(self):
+		chore = self.make_recurring("Recurring", Chore.Schedule.DAILY, date(2026, 9, 8))
+		self.complete(chore)
+		next_occurrence = Chore.objects.get(status=Chore.Status.ACTIVE, name="Recurring")
+		self.assertEqual(next_occurrence.due_date, date(2026, 9, 9))
+		self.assertIsNone(next_occurrence.completed_at)
+		self.assertIsNone(next_occurrence.completed_by)
+
+	def test_weekly_occurrence_is_due_in_seven_days(self):
+		chore = self.make_recurring("Recurring", Chore.Schedule.WEEKLY, date(2026, 9, 8))
+		self.complete(chore)
+		next_occurrence = Chore.objects.get(status=Chore.Status.ACTIVE, name="Recurring")
+		self.assertEqual(next_occurrence.due_date, date(2026, 9, 15))
+
+	def test_monthly_occurrence_preserves_day_of_month(self):
+		chore = self.make_recurring("Recurring", Chore.Schedule.MONTHLY, date(2026, 1, 31))
+		self.complete(chore)
+		next_occurrence = Chore.objects.get(status=Chore.Status.ACTIVE, name="Recurring")
+		self.assertEqual(next_occurrence.due_date, date(2026, 2, 28))
+		self.complete(next_occurrence)
+		next2 = Chore.objects.get(status=Chore.Status.ACTIVE, name="Recurring")
+		# The intended day (31st) returns once the month contains it again.
+		self.assertEqual(next2.due_date, date(2026, 3, 31))
+
+	def test_month_end_clamps_across_year_boundary(self):
+		chore = self.make_recurring("Recurring", Chore.Schedule.MONTHLY, date(2026, 12, 31))
+		self.complete(chore)
+		next_occurrence = Chore.objects.get(status=Chore.Status.ACTIVE, name="Recurring")
+		self.assertEqual(next_occurrence.due_date, date(2027, 1, 31))
+		self.complete(next_occurrence)
+		next2 = Chore.objects.get(status=Chore.Status.ACTIVE, name="Recurring")
+		self.assertEqual(next2.due_date, date(2027, 2, 28))
+
+	def test_completed_occurrence_is_recorded_separately(self):
+		chore = self.make_recurring("Recurring", Chore.Schedule.WEEKLY, date(2026, 9, 8))
+		self.complete(chore)
+		completed = Chore.objects.filter(status=Chore.Status.COMPLETED, name="Recurring")
+		self.assertEqual(completed.count(), 1)
+		occurrence = completed.get()
+		self.assertEqual(occurrence.completed_by, self.membership)
+		self.assertIsNotNone(occurrence.completed_at)
+		self.assertEqual(occurrence.due_date, date(2026, 9, 8))
+		self.assertEqual(occurrence.household, self.household)
+		self.assertEqual(occurrence.schedule, Chore.Schedule.WEEKLY)
+
+	def test_repeated_completion_does_not_duplicate_occurrences(self):
+		chore = self.make_recurring("Recurring", Chore.Schedule.DAILY, date(2026, 9, 8))
+		self.complete(chore)
+		self.complete(chore)
+		completed = Chore.objects.filter(status=Chore.Status.COMPLETED, name="Recurring")
+		self.assertEqual(completed.count(), 1)
+		active = Chore.objects.filter(status=Chore.Status.ACTIVE, name="Recurring")
+		self.assertEqual(active.count(), 1)
+		self.assertEqual(active.get().due_date, date(2026, 9, 9))
+
+	def test_next_occurrence_keeps_assignment_policy(self):
+		chore = self.make_recurring("Recurring", Chore.Schedule.WEEKLY, date(2026, 9, 8))
+		self.complete(chore)
+		next_occurrence = Chore.objects.get(status=Chore.Status.ACTIVE, name="Recurring")
+		self.assertIsNone(next_occurrence.assignee)
+		assigned = self.make_recurring(
+			"Assigned",
+			Chore.Schedule.WEEKLY,
+			date(2026, 9, 8),
+			assignee=self.membership,
+		)
+		self.complete(assigned)
+		next_occurrence = Chore.objects.get(status=Chore.Status.ACTIVE, name="Assigned")
+		self.assertEqual(next_occurrence.assignee, self.membership)
+
+	def test_recurring_chore_without_due_date_is_rejected(self):
+		response = self.client.post(reverse("create_chore"), {"name": "No date", "schedule": "daily"})
+		self.assertContains(response, "needs a due date")
+		self.assertFalse(Chore.objects.filter(name="No date").exists())
+		with self.assertRaises(ValidationError):
+			Chore.objects.create(
+				household=self.household,
+				creator=self.membership,
+				name="Model level",
+				schedule=Chore.Schedule.WEEKLY,
+			)

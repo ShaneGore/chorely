@@ -1,3 +1,6 @@
+import calendar
+from datetime import timedelta
+
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
@@ -85,6 +88,7 @@ class Chore(models.Model):
 		choices=Status,
 		default=Status.ACTIVE,
 	)
+	recurrence_day = models.PositiveSmallIntegerField(blank=True, null=True)
 	completed_by = models.ForeignKey(
 		Membership,
 		on_delete=models.PROTECT,
@@ -122,12 +126,39 @@ class Chore(models.Model):
 			errors["creator"] = "The creator must belong to the chore's household."
 		if self.assignee_id and self.assignee.household_id != self.household_id:
 			errors["assignee"] = "The assignee must belong to the chore's household."
+		if self.schedule != self.Schedule.ONE_OFF and self.due_date is None:
+			errors["due_date"] = "A recurring chore needs a due date so the next occurrence can be scheduled."
 		if errors:
 			raise ValidationError(errors)
 
 	def save(self, *args, **kwargs):
+		if self.schedule == self.Schedule.MONTHLY and self.recurrence_day is None and self.due_date:
+			self.recurrence_day = self.due_date.day
 		self.full_clean()
-		return super().save(*args, **kwargs)
+		super().save(*args, **kwargs)
+
+	def next_due_date(self, from_date):
+		"""Return the due date of the next occurrence after ``from_date``.
+
+		Monthly chores keep the intended day of month when the target month
+		contains it. When the day is missing (for example the 31st in
+		February) the next occurrence falls on the last valid day of that
+		month, and the following month returns to the original day.
+		"""
+		if self.schedule == self.Schedule.DAILY:
+			return from_date + timedelta(days=1)
+		if self.schedule == self.Schedule.WEEKLY:
+			return from_date + timedelta(weeks=1)
+		if self.schedule == self.Schedule.MONTHLY:
+			month = from_date.month + 1
+			year = from_date.year
+			if month > 12:
+				month = 1
+				year += 1
+			last_day = calendar.monthrange(year, month)[1]
+			day = min(self.recurrence_day or from_date.day, last_day)
+			return from_date.replace(year=year, month=month, day=day)
+		raise ValueError("One-off chores do not recur.")
 
 	def __str__(self):
 		return self.name
